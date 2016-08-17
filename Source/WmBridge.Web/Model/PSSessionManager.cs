@@ -4,19 +4,16 @@
 //  THIS SOFTWARE IS PROVIDED "AS IS" WITHOUT ANY WARRANTIES
 //
 
+using log4net;
+using Newtonsoft.Json;
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Management.Automation;
 using System.Management.Automation.Runspaces;
 using System.Runtime.Caching;
-using System.Security;
 using System.Security.Cryptography;
 using System.Text;
-using Newtonsoft.Json;
-using System.Collections.Generic;
-using System.Collections;
-using Newtonsoft.Json.Linq;
-using log4net;
 
 namespace WmBridge.Web.Model
 {
@@ -36,6 +33,8 @@ namespace WmBridge.Web.Model
         public const string PSConnectionKey = "PSConnection";
         public const string PSConnectionStateKey = "PSConnectionState";
         public const string PSHostClientKey = "PSHostClient";
+        public const string PSVersionKey = "PSVersion";
+        public const string ClientVersionKey = "ClientVersion";
         public const string RefCounterKey = "RefCounter";
 
         private bool disposed = false;
@@ -123,6 +122,7 @@ namespace WmBridge.Web.Model
                 throw;
             }
 
+            var eap = "";
             using (var ps = PowerShell.Create())
             {
                 ps.Runspace = runspace;
@@ -130,11 +130,38 @@ namespace WmBridge.Web.Model
                 string script = options.InteractiveTerminal ? "" : "$ErrorActionPreference = 'stop';";
 
                 if (!string.IsNullOrEmpty(options.ExecutionPolicy))
-                    script += "Set-ExecutionPolicy $args[0] -Scope Process -Force";
+                    script += "Set-ExecutionPolicy $args[0] -Scope Process -Force;";
+
+                script += "$PSVersionTable.PSVersion; $ErrorActionPreference;";
 
                 ps.AddScript(script);
                 ps.AddArgument(options.ExecutionPolicy);
-                ps.Invoke();
+                var psResult = ps.Invoke();
+
+                if (psResult.Count == 2)
+                {
+                    sessionStateVars.Add(PSSessionManager.PSVersionKey, psResult[0].BaseObject as Version);
+                    eap = psResult[1].ToString();
+                }
+            }
+
+            if (!string.IsNullOrEmpty(options.Script))
+            {
+                using (var ps = PowerShell.Create())
+                {
+                    ps.Runspace = runspace;
+                    ps.AddScript($"$ErrorActionPreference = 'stop'; {options.Script}; $ErrorActionPreference = '{eap}';");
+                    ps.Invoke();
+                }
+            }
+
+            if (!string.IsNullOrEmpty(options.ClientVersion))
+            {
+                Version ver;
+                if (Version.TryParse(options.ClientVersion, out ver))
+                {
+                    sessionStateVars.Add(PSSessionManager.ClientVersionKey, ver);
+                }
             }
 
             return runspace;
@@ -199,7 +226,7 @@ namespace WmBridge.Web.Model
         /// <summary>
         /// Creates new remote PS session if neccesary, and returns unique session identifier
         /// </summary>
-        public string Connect(PSConnection options)
+        public string Connect(PSConnection options, out object state)
         {
             var connectionHash = GetConnectionHash(options);
 
@@ -219,17 +246,18 @@ namespace WmBridge.Web.Model
                 throw;
             }
 
-            var state = ((ConcurrentDictionary<string, object>)sessionState
+            var stateDict = ((ConcurrentDictionary<string, object>)sessionState
                 .GetOrAdd(connectionHash, _ => new ConcurrentDictionary<string, object>()));
                 
-            state.AddOrUpdate(RefCounterKey, 1, (key, current) => (int)current + 1);
+            stateDict.AddOrUpdate(RefCounterKey, 1, (key, current) => (int)current + 1);
 
             foreach (var sesVars in sessionStateVars)
-                state.TryAdd(sesVars.Key, sesVars.Value);
+                stateDict.TryAdd(sesVars.Key, sesVars.Value);
 
-            string newSession = Guid.NewGuid().ToString(); ;
+            string newSession = Guid.NewGuid().ToString();
             sessions.Add(newSession, connectionHash, options.ShortTimeConnection ? shortTimeSessionPolicy : sessionPolicy); // session refers to shared connection
 
+            state = stateDict;
             return newSession;
         }
 

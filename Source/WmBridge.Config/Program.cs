@@ -5,10 +5,8 @@
 //
 
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.ServiceProcess;
-using System.Threading.Tasks;
 using System.Windows.Forms;
 
 namespace WmBridge.Config

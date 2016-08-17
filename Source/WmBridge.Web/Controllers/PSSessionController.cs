@@ -8,6 +8,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Management;
+using System.Management.Automation;
 using System.Management.Automation.Remoting;
 using System.Net.Http;
 using System.Reflection;
@@ -26,12 +27,17 @@ namespace WmBridge.Web.Controllers
 
             try
             {
-                return Json(new { 
-                    Session = PSSessionManager.Default.Connect(options),
-                    Version = GetVersion()
+                object state;
+                var session = PSSessionManager.Default.Connect(options, out state);
+                Request.Properties[PSSessionManager.PSConnectionStateKey] = state;
+
+                return Json(new {
+                    Session = session,
+                    Version = GetVersion(),
+                    PSVersion = Request.GetPSVersionString()
                 });
             }
-            catch (PSRemotingTransportException ex)
+            catch (Exception ex) when (ex is PSRemotingTransportException || ex is RemoteException)
             {
                 throw new HttpResponseException(Request.CreateErrorResponse(System.Net.HttpStatusCode.BadRequest, ex.Message));
             }
@@ -72,10 +78,14 @@ namespace WmBridge.Web.Controllers
         [Route("capabilities"), HttpGet]
         public IHttpActionResult Capabilities()
         {
+            Version clientVersion = Request.GetClientVersion() ?? new Version();
+
             var components = new List<object>();
 
-            var discover = InvokePowerShell(@"New-Object PSObject -Property @{IIS = (Get-Item HKLM:\software\microsoft\InetStp -ea si) -ne $null}", 
-                PSSelect("IIS")).Single();
+            var discover = InvokePowerShell(@"New-Object PSObject -Property @{" +
+                   @"IIS = (gi ""HKLM:\software\microsoft\InetStp"" -ea SilentlyContinue) -ne $null;" +
+                @"HyperV = (gp ""HKLM:\software\microsoft\Windows NT\CurrentVersion\Virtualization"" ""Version"" -ea SilentlyContinue).Version -ne $null}",
+                            PSSelect("IIS", "HyperV")).Single();
             
             components.Add(new { Name = "process", Caption = "Processes" });
             components.Add(new { Name = "service", Caption = "Services" });
@@ -85,6 +95,9 @@ namespace WmBridge.Web.Controllers
 
             components.Add(new { Name = "eventlog", Caption = "Event Viewer" });
             components.Add(new { Name = "certificate", Caption = "Certificates" });
+
+            if (clientVersion >= Version.Parse("1.3") && Convert.ToBoolean(discover["HyperV"]))
+                components.Add(new { Name = "hyperv", Caption = "Hyper-V" });
 
             return Json(new
             {
